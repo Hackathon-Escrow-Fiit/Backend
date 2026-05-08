@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+openai
+web3
+python-dotenv
+python-multipart
+aiofiles

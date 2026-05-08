@@ -1,0 +1,42 @@
+# Environment variables (contains API keys and secrets)
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# SQLite database
+*.db
+*.sqlite
+*.sqlite3
+decentrawork.db
+
+# Temporary submission files
+tmp/
+submissions/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test files
+test_contract.sol
+
+# Logs
+*.log
