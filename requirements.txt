@@ -5,3 +5,4 @@ web3
 python-dotenv
 python-multipart
 aiofiles
+psycopg2-binary
