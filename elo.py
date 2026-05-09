@@ -3,17 +3,19 @@ DecentraWork Elo Rating System
 
 Formula (applied at client/DAO decision time):
 
-  Accepted: delta = +round(BASE × (ai + 0.05) × E × nur)
-  Rejected: delta = -round(BASE × (1 - ai)    × E / nur)
+  Accepted: delta = +round(BASE × ai × E × nur × rating_factor)
+  Rejected: delta = -round(BASE × (1 - ai) × E / nur)
 
-  ai  = confidence_score / 100          (AI quality, 0-1)
-  E   = 1 / (1 + 10^((complexity - elo) / 400))   (expected score, 0-1)
-  nur = new_user_rating (2.5 first task → 1.0 at 30 tasks)
-  BASE = 95   (calibrated so ai=100%, E=0.5, nur=1.0 → exactly +50)
+  ai            = confidence_score / 100          (AI quality, 0-1)
+  E             = 1 / (1 + 10^((complexity - elo) / 400))  (expected score, 0-1)
+  nur           = new_user_rating (2.5 first task → 1.0 at 30 tasks)
+  rating_factor = (MAX_ELO - elo) / (MAX_ELO - STARTING_ELO)  (1.0 at start → 0.1 at max)
+  BASE          = 50  (max Elo per task: ai=100%, E=1.0, nur=1.0, rating_factor=1.0)
 
 Direction is always set by the human decision (approved/rejected).
 Magnitude is set by AI quality: high score + approved = big gain,
 good score wrongly rejected = small penalty.
+Higher Elo → smaller gains (rating_factor shrinks toward top).
 """
 
 STARTING_ELO = 300

@@ -9,12 +9,13 @@ from storage import (
     init_db, save_uploaded_files, save_evaluating, save_pending,
     update_report, get_pending, update_status, delete_submission,
     list_submission_files, get_submission_file_path,
-    get_elo_record, save_elo_record, add_dispute_loss_modifier,
+    save_task_rating, get_task_rating,
 )
-from evaluator import run_ai_evaluation
+from evaluator import run_ai_evaluation, rate_task
 from contracts import (
     get_profile_from_chain,
     approve_work_on_chain, reject_work_on_chain, set_skill_on_chain,
+    get_elo_from_chain, update_elo_on_chain, increment_tasks_on_chain,
 )
 from elo import apply_elo, get_tier, STARTING_ELO
 
@@ -203,10 +204,6 @@ async def dao_resolve(body: DaoResolveRequest):
     # keep_files=True so users can still download the code after the DAO verdict
     result = _finalise(body.escrow_id, record, approved=body.approved, keep_files=True)
 
-    # If DAO overruled the AI and sided with the client (rejected), add K-boost for recovery
-    if not body.approved:
-        add_dispute_loss_modifier(record["freelancer"])
-
     return result
 
 
@@ -266,17 +263,68 @@ async def delete_submission_files(escrow_id: str):
 
 
 # ─────────────────────────────────────────
+# RATE TASK — AI rates the task difficulty before work starts
+# ─────────────────────────────────────────
+class RateTaskRequest(BaseModel):
+    escrow_id: str
+    task_description: str
+    required_skills: list[str] = []
+
+
+@app.post("/rate-task")
+async def rate_task_endpoint(body: RateTaskRequest):
+    """
+    AI rates the task difficulty and stores the result in the DB.
+
+    Call this when a task is posted / before freelancers apply.
+    The stored complexity_score is later used in the Elo formula when
+    evaluating the freelancer's submission.
+
+    Returns:
+        escrow_id, task_rating (0-100), complexity_score (100-1000), reasoning
+    """
+    result = rate_task(body.task_description, body.required_skills)
+
+    save_task_rating(
+        body.escrow_id,
+        result["task_rating"],
+        result["complexity_score"],
+        result["reasoning"],
+    )
+
+    return {
+        "escrow_id":        body.escrow_id,
+        "task_rating":      result["task_rating"],
+        "complexity_score": result["complexity_score"],
+        "estimated_files":  result["estimated_files"],
+        "estimated_hours":  result["estimated_hours"],
+        "reasoning":        result["reasoning"],
+        "clarity_score":    result["clarity_score"],
+        "clarity_issues":   result["clarity_issues"],
+    }
+
+
+@app.get("/rate-task/{escrow_id}")
+async def get_task_rating_endpoint(escrow_id: str):
+    """Returns the stored task rating for a given escrow."""
+    record = get_task_rating(escrow_id)
+    if not record:
+        raise HTTPException(404, "No task rating found for this escrow")
+    return {"escrow_id": escrow_id, **record}
+
+
+# ─────────────────────────────────────────
 # ELO — read a freelancer's current Elo rating
 # ─────────────────────────────────────────
 @app.get("/elo/{address}")
 async def get_elo(address: str):
-    """Returns current Elo, tier, and task count for a freelancer wallet address."""
-    record = get_elo_record(address)
+    """Returns current Elo, tier, and task count for a freelancer wallet address (from chain)."""
+    data = get_elo_from_chain(address)
     return {
         "address": address,
-        "elo": record["elo"],
-        "tier": get_tier(record["elo"]),
-        "tasks_completed": record["tasks_completed"],
+        "elo": data["elo"],
+        "tier": get_tier(data["elo"]),
+        "tasks_completed": data["tasks_completed"],
         "starting_elo": STARTING_ELO,
     }
 
@@ -340,26 +388,22 @@ def _finalise(escrow_id: str, record: dict, approved: bool, keep_files: bool = F
             for skill, data in ai_report.get("suggested_skills", {}).items()
         }
     else:
-        elo_record_pre = get_elo_record(freelancer)
-        reputation_delta = _rejection_penalty(elo_record_pre["tasks_completed"])
+        chain_pre = get_elo_from_chain(freelancer)
+        reputation_delta = _rejection_penalty(chain_pre["tasks_completed"])
         skill_changes = {}
 
-    # ── Elo (applied here, at decision time) ──────────────────────────
-    elo_record = get_elo_record(freelancer)
+    # ── Elo (applied here, at decision time — read/write chain) ───────
+    chain_elo = get_elo_from_chain(freelancer)
     elo_result = apply_elo(
-        current_elo=elo_record["elo"],
-        tasks_completed=elo_record["tasks_completed"],
-        active_modifiers=elo_record["active_modifiers"],
-        task_complexity=ai_report.get("task_complexity", 800),
+        current_elo=chain_elo["elo"],
+        tasks_completed=chain_elo["tasks_completed"],
+        active_modifiers=[],
+        task_complexity=ai_report.get("task_complexity", 400),
         confidence_score=ai_report.get("confidence_score", 50),
         approved=approved,
     )
-    save_elo_record(
-        freelancer,
-        elo_result["new_elo"],
-        elo_result["new_tasks_completed"],
-        elo_result["updated_modifiers"],
-    )
+    update_elo_on_chain(freelancer, elo_result["elo_delta"])
+    increment_tasks_on_chain(freelancer)
 
     if keep_files:
         update_status(escrow_id, "dao_resolved")

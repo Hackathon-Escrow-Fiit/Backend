@@ -42,11 +42,12 @@ def init_db():
                 END $$
             """)
             cur.execute("""
-                CREATE TABLE IF NOT EXISTS freelancer_elo (
-                    address          TEXT PRIMARY KEY,
-                    elo              INT  DEFAULT 600,
-                    tasks_completed  INT  DEFAULT 0,
-                    active_modifiers JSONB DEFAULT '[]'
+                CREATE TABLE IF NOT EXISTS task_ratings (
+                    escrow_id        TEXT PRIMARY KEY,
+                    task_rating      INT  NOT NULL,
+                    complexity_score INT  NOT NULL,
+                    reasoning        TEXT,
+                    created_at       TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
 
@@ -203,46 +204,41 @@ def save_uploaded_files(escrow_id: str, files: list) -> list[str]:
     return saved_paths
 
 
-# ── Elo helpers ────────────────────────────────────────────────────────────────
-
-def get_elo_record(address: str) -> dict:
-    """Returns the freelancer's Elo record, auto-initialising to 600 if missing."""
-    addr = address.lower()
-    with _get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT elo, tasks_completed, active_modifiers FROM freelancer_elo WHERE address = %s",
-                (addr,)
-            )
-            row = cur.fetchone()
-
-    if row:
-        return {"elo": row[0], "tasks_completed": row[1], "active_modifiers": row[2] or []}
-
-    return {"elo": 600, "tasks_completed": 0, "active_modifiers": []}
-
-
-def save_elo_record(address: str, elo: int, tasks_completed: int, active_modifiers: list) -> None:
-    """Upserts the freelancer's Elo record."""
-    addr = address.lower()
+def save_task_rating(escrow_id: str, task_rating: int, complexity_score: int, reasoning: str) -> None:
+    """Stores the AI's task difficulty rating for a given escrow."""
     with _get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO freelancer_elo (address, elo, tasks_completed, active_modifiers)
+                INSERT INTO task_ratings (escrow_id, task_rating, complexity_score, reasoning)
                 VALUES (%s, %s, %s, %s)
-                ON CONFLICT (address) DO UPDATE
-                    SET elo              = EXCLUDED.elo,
-                        tasks_completed  = EXCLUDED.tasks_completed,
-                        active_modifiers = EXCLUDED.active_modifiers
+                ON CONFLICT (escrow_id) DO UPDATE
+                    SET task_rating      = EXCLUDED.task_rating,
+                        complexity_score = EXCLUDED.complexity_score,
+                        reasoning        = EXCLUDED.reasoning
                 """,
-                (addr, elo, tasks_completed, json.dumps(active_modifiers))
+                (escrow_id, task_rating, complexity_score, reasoning)
             )
 
 
-def add_dispute_loss_modifier(address: str) -> None:
-    """Adds a dispute_loss modifier (K boost for next 3 tasks) to the freelancer's record."""
-    record = get_elo_record(address)
-    mods = record["active_modifiers"]
-    mods.append({"type": "dispute_loss", "remaining": 3})
-    save_elo_record(address, record["elo"], record["tasks_completed"], mods)
+def get_task_rating(escrow_id: str) -> dict | None:
+    """Returns the stored task rating for a given escrow, or None if not found."""
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT task_rating, complexity_score, reasoning, created_at FROM task_ratings WHERE escrow_id = %s",
+                (escrow_id,)
+            )
+            row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return {
+        "task_rating":      row[0],
+        "complexity_score": row[1],
+        "reasoning":        row[2],
+        "created_at":       row[3].isoformat() if row[3] else None,
+    }
+
+

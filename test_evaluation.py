@@ -17,8 +17,13 @@ import json
 import time
 from pathlib import Path
 
-# Backend URL
-BASE_URL = "http://localhost:8000"
+BASE_URL        = "http://localhost:8000"
+TASK_DESCRIPTION = (
+    "Create a simple escrow smart contract that allows the client to release "
+    "funds to the freelancer or refund to themselves. Must include basic access control."
+)
+REQUIRED_SKILLS = ["solidity", "smart-contracts"]
+FREELANCER_ADDR = "0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1"
 
 # Sample Solidity contract for testing
 SAMPLE_CONTRACT = """
@@ -68,7 +73,40 @@ def test_health():
     print()
     return response.status_code == 200
 
-def test_evaluate():
+def test_rate_task(escrow_id: str) -> bool:
+    """Step 0: AI rates the task difficulty before any work is submitted."""
+    print("=" * 60)
+    print("Testing /rate-task endpoint...")
+    print("=" * 60)
+
+    payload = {
+        "escrow_id":        escrow_id,
+        "task_description": TASK_DESCRIPTION,
+        "required_skills":  REQUIRED_SKILLS,
+    }
+
+    try:
+        response = requests.post(f"{BASE_URL}/rate-task", json=payload)
+        print(f"Status: {response.status_code}")
+
+        if response.status_code != 200:
+            print(f"Error: {response.text}")
+            return False
+
+        r = response.json()
+        print(f"\n  Escrow ID:        {r['escrow_id']}")
+        print(f"  Task Rating:      {r['task_rating']} / 100")
+        print(f"  Complexity Score: {r['complexity_score']} / 1000  (used in Elo formula)")
+        print(f"  Reasoning:        {r['reasoning']}")
+        print()
+        return True
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return False
+
+
+def test_evaluate(escrow_id: str):
     """Test the evaluation endpoint (async — polls /report until done)."""
     print("=" * 60)
     print("Testing /evaluate endpoint...")
@@ -77,12 +115,11 @@ def test_evaluate():
     contract_path = Path("test_contract.sol")
     contract_path.write_text(SAMPLE_CONTRACT)
 
-    escrow_id = f"test_escrow_{int(time.time())}"
     data = {
-        'escrow_id': escrow_id,
-        'freelancer_address': '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
-        'customer_task': 'Create a simple escrow smart contract that allows the client to release funds to the freelancer or refund to themselves. Must include basic access control.',
-        'required_skills': json.dumps(['solidity', 'smart-contracts'])
+        'escrow_id':         escrow_id,
+        'freelancer_address': FREELANCER_ADDR,
+        'customer_task':     TASK_DESCRIPTION,
+        'required_skills':   json.dumps(REQUIRED_SKILLS),
     }
 
     print(f"Sending evaluation request for escrow: {data['escrow_id']}")
@@ -109,6 +146,7 @@ def test_evaluate():
 
         # Poll /report until status leaves 'evaluating'
         print("Polling /report for result", end="", flush=True)
+        report = {}
         for _ in range(120):  # up to 2 minutes
             time.sleep(5)
             print(".", end="", flush=True)
@@ -162,11 +200,11 @@ def test_evaluate():
         print("=" * 60)
         print(report['detailed_report'])
         print("=" * 60)
-        return escrow_id
+        return True
 
     except Exception as e:
         print(f"Error: {e}")
-        return None
+        return False
     finally:
         try:
             if contract_path.exists():
@@ -260,20 +298,27 @@ def main():
 
     print("✅ Server is running!\n")
 
-    # Test 2: Evaluate submission
-    escrow_id = test_evaluate()
+    escrow_id = f"test_escrow_{int(time.time())}"
 
-    if not escrow_id:
+    # Test 2: Rate the task before any work is submitted
+    if not test_rate_task(escrow_id):
+        print("❌ Task rating failed. Check the error above.")
+        return
+
+    print("✅ Task rated!\n")
+
+    # Test 3: Evaluate submission
+    if not test_evaluate(escrow_id):
         print("❌ Evaluation failed. Check the error above.")
         return
 
     print("✅ Evaluation successful!\n")
 
-    # Test 3: Get report
+    # Test 4: Get report
     test_get_report(escrow_id)
     print("✅ Report retrieval successful!\n")
 
-    # Test 4: Finalize (approved)
+    # Test 5: Finalize (approved)
     test_finalize(escrow_id, work_approved=True)
     print("✅ Finalization successful!\n")
 

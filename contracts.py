@@ -13,6 +13,9 @@ REPUTATION_ABI = [
     {"name": "getReputation", "type": "function", "stateMutability": "view",
      "inputs": [{"name": "user", "type": "address"}],
      "outputs": [{"name": "", "type": "uint256"}]},
+    {"name": "getTasksCompleted", "type": "function", "stateMutability": "view",
+     "inputs": [{"name": "user", "type": "address"}],
+     "outputs": [{"name": "", "type": "uint256"}]},
     {"name": "getSkill", "type": "function", "stateMutability": "view",
      "inputs": [{"name": "user", "type": "address"}, {"name": "skill", "type": "string"}],
      "outputs": [{"name": "", "type": "uint8"}]},
@@ -21,6 +24,11 @@ REPUTATION_ABI = [
          {"name": "user", "type": "address"}, {"name": "skill", "type": "string"},
          {"name": "score", "type": "uint8"}, {"name": "jobId", "type": "uint256"}
      ], "outputs": []},
+    {"name": "updateReputation", "type": "function", "stateMutability": "nonpayable",
+     "inputs": [{"name": "user", "type": "address"}, {"name": "delta", "type": "int256"}],
+     "outputs": []},
+    {"name": "incrementTasksCompleted", "type": "function", "stateMutability": "nonpayable",
+     "inputs": [{"name": "user", "type": "address"}], "outputs": []},
 ]
 
 MARKETPLACE_ABI = [
@@ -60,6 +68,37 @@ if agent_private_key:
 
 
 # ── Read helpers ──────────────────────────────────────────────────────────────
+
+def get_elo_from_chain(wallet_address: str) -> dict:
+    """Reads reputation (Elo) and tasksCompleted from the contract."""
+    if not reputation:
+        return {"elo": 300, "tasks_completed": 0}
+    try:
+        addr = Web3.to_checksum_address(wallet_address)
+        elo   = reputation.functions.getReputation(addr).call()
+        tasks = reputation.functions.getTasksCompleted(addr).call()
+        return {"elo": elo, "tasks_completed": tasks}
+    except Exception as e:
+        print(f"[contracts] Error reading Elo for {wallet_address}: {e}")
+        return {"elo": 300, "tasks_completed": 0}
+
+
+def update_elo_on_chain(wallet_address: str, delta: int) -> bool:
+    """Calls ReputationSystem.updateReputation with the Elo delta."""
+    if not reputation:
+        print("[contracts] REPUTATION_ADDRESS not set — skipping updateReputation")
+        return False
+    addr = Web3.to_checksum_address(wallet_address)
+    return _send(reputation.functions.updateReputation(addr, delta))
+
+
+def increment_tasks_on_chain(wallet_address: str) -> bool:
+    """Calls ReputationSystem.incrementTasksCompleted."""
+    if not reputation:
+        return False
+    addr = Web3.to_checksum_address(wallet_address)
+    return _send(reputation.functions.incrementTasksCompleted(addr))
+
 
 def get_profile_from_chain(wallet_address: str, required_skills: list[str] | None = None) -> dict:
     """

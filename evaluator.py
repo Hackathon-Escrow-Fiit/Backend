@@ -155,7 +155,7 @@ Respond ONLY with this JSON (no markdown, no extra text):
     "detailed_report": "Full markdown report with specific file:line references (min 300 words)",
     "recommendation": "approve" | "reject" | "escalate_to_dao",
     "confidence_score": integer 0-100,
-    "task_complexity": integer 400-2400,
+    "task_complexity": integer 100-1000,
     "suggested_reputation_delta": integer -20 to +20,
     "suggested_skills": {{
         "skill_name": {{
@@ -216,4 +216,130 @@ Respond ONLY with this JSON (no markdown, no extra text):
     result.setdefault("confidence_score", 50)
     result.setdefault("task_complexity", 400)
     result.setdefault("code_issues", [])
+    return result
+
+
+def rate_task(task_description: str, required_skills: list[str]) -> dict:
+    """
+    AI rates the task difficulty AND clarity.
+
+    Returns:
+        task_rating      — overall difficulty 0-100
+        complexity_score — Elo-scale complexity 100-1000
+        estimated_files  — rough number of files/contracts needed
+        estimated_hours  — rough man-hours for an experienced dev
+        reasoning        — what makes it hard/easy
+        clarity_score    — how clear the task description is (0-100)
+        clarity_issues   — list of missing/ambiguous details
+    """
+    response = client.chat.completions.create(
+        model="meta/llama-3.3-70b-instruct",
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a senior tech lead evaluating freelance tasks for a decentralized platform. "
+                    "You assess BOTH difficulty and whether the task description gives a freelancer enough information to start work. "
+                    "Be calibrated and use the full range — most tasks fall between 150 and 750. "
+                    "Always respond with valid JSON only. No extra text, no markdown fences."
+                )
+            },
+            {
+                "role": "user",
+                "content": f"""
+Evaluate this freelance task for complexity and clarity.
+
+=== TASK DESCRIPTION ===
+{task_description}
+
+=== REQUIRED SKILLS ===
+{', '.join(required_skills) if required_skills else 'not specified'}
+
+=== COMPLEXITY CALIBRATION ===
+
+Use these concrete anchors. Be precise — do not cluster everything at 60-80.
+
+task_rating (0-100):
+  0-15:   Copy-paste job — any beginner, < 30 min (e.g. "add a button to this page")
+  16-30:  Junior task — 1-4 hours (e.g. "write a simple ERC20 token", "add a REST endpoint")
+  31-50:  Mid-level — half a day to 2 days (e.g. "build a basic escrow contract with tests", "CRUD API with auth")
+  51-70:  Senior — 3-7 days (e.g. "audit a 4-contract DeFi protocol", "multi-chain bridge prototype")
+  71-85:  Expert — 1-3 weeks (e.g. "build an AMM from scratch", "full security audit with formal report")
+  86-100: Research-level — requires novel design or deep specialisation
+
+complexity_score (100-1000) — estimate based on deliverable size and depth:
+  100-150:  1 file, < 50 LOC, trivial logic
+  150-250:  1-2 files, 50-150 LOC, standard patterns only
+  250-400:  2-5 files, 150-400 LOC, some custom logic (e.g. simple ERC20, basic escrow)
+  400-550:  4-10 files, 400-800 LOC, moderate complexity (e.g. auditing one contract, auth system)
+  550-700:  8-20 files, 800-2000 LOC, non-trivial design decisions (e.g. multi-contract DeFi, full dApp)
+  700-850:  15-40 files, 2000-5000 LOC, security-critical or highly interdependent systems
+  850-1000: 40+ files, 5000+ LOC, or requires novel research / cross-chain architecture
+
+estimated_files: integer — rough number of source files the freelancer would need to produce
+estimated_hours: integer — realistic hours for an experienced developer (not a beginner)
+
+=== CLARITY EVALUATION ===
+
+clarity_score (0-100):
+  0-30:   Vague — a freelancer cannot start without asking many questions
+  31-60:  Partial — key pieces are there but important details are missing
+  61-80:  Good — most things are clear, minor gaps
+  81-100: Excellent — acceptance criteria, tech stack, constraints all specified
+
+clarity_issues: list of specific missing or ambiguous items. Examples:
+  - "No acceptance criteria defined — what exactly does 'done' look like?"
+  - "Tech stack not specified — which Solidity version / framework?"
+  - "No mention of test coverage expectations"
+  - "Budget seems low for the described scope"
+  - "Deadline not mentioned"
+  - "Unclear who the end users are"
+  If everything is clear, return an empty list.
+
+Respond ONLY with this JSON (no markdown, no extra text):
+{{
+    "task_rating": integer 0-100,
+    "complexity_score": integer 100-1000,
+    "estimated_files": integer,
+    "estimated_hours": integer,
+    "reasoning": "2-3 sentences explaining the complexity rating with specific references to the task",
+    "clarity_score": integer 0-100,
+    "clarity_issues": ["issue 1", "issue 2"]
+}}
+"""
+            }
+        ],
+        temperature=0.1
+    )
+
+    raw = response.choices[0].message.content.strip()
+
+    try:
+        result = json.loads(raw)
+    except json.JSONDecodeError:
+        start = raw.find("{")
+        end   = raw.rfind("}") + 1
+        if start != -1 and end > start:
+            try:
+                result = json.loads(raw[start:end])
+            except json.JSONDecodeError:
+                result = None
+        else:
+            result = None
+
+    if result is None:
+        return {
+            "task_rating": 50, "complexity_score": 400,
+            "estimated_files": 5, "estimated_hours": 16,
+            "reasoning": "AI rating failed — defaulting to moderate.",
+            "clarity_score": 50, "clarity_issues": [],
+        }
+
+    result["task_rating"]      = max(0,   min(100,  int(result.get("task_rating",      50))))
+    result["complexity_score"] = max(100, min(1000, int(result.get("complexity_score", 400))))
+    result["estimated_files"]  = max(1,         int(result.get("estimated_files",  5)))
+    result["estimated_hours"]  = max(1,         int(result.get("estimated_hours", 16)))
+    result["clarity_score"]    = max(0,   min(100,  int(result.get("clarity_score",    50))))
+    result.setdefault("reasoning", "")
+    result.setdefault("clarity_issues", [])
     return result
