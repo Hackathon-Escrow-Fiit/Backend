@@ -75,8 +75,11 @@ def run_ai_evaluation(
                 "Reject this submission and apply reputation penalty for non-delivery."
             ),
             "recommendation": "reject",
+            "confidence_score": 0,
+            "task_complexity": 400,
             "suggested_reputation_delta": -10,
-            "suggested_skills": {}
+            "suggested_skills": {},
+            "code_issues": []
         }
 
     # Build skill context string for the prompt
@@ -94,15 +97,17 @@ def run_ai_evaluation(
             {
                 "role": "system",
                 "content": (
-                    "You are a technical evaluator for a decentralized freelance platform. "
-                    "Generate detailed evaluation reports that help clients and DAO voters make informed decisions. "
-                    "Always respond with valid JSON only. No extra text, no markdown, no code blocks."
+                    "You are a senior technical reviewer for a decentralized freelance platform. "
+                    "Your job is to produce actionable, specific code reviews — not vague summaries. "
+                    "Always cite the exact file name and approximate line number for every issue. "
+                    "Quote the problematic code snippet and explain precisely why it is wrong or risky. "
+                    "Always respond with valid JSON only. No extra text, no markdown fences, no code blocks."
                 )
             },
             {
                 "role": "user",
                 "content": f"""
-Evaluate this freelance submission and create a detailed report for the client and DAO voters.
+Evaluate this freelance submission and create a detailed technical report for the client and DAO voters.
 
 === CUSTOMER TASK ===
 {customer_task}
@@ -111,7 +116,7 @@ Evaluate this freelance submission and create a detailed report for the client a
 {', '.join(required_skills)}
 
 === FREELANCER CURRENT PROFILE ===
-Reputation: {current_reputation}/1000
+Reputation: {current_reputation}
 Skills:
 {skills_context}
 
@@ -119,31 +124,56 @@ Skills:
 {files_content}
 
 === INSTRUCTIONS ===
-Create a comprehensive evaluation report that includes:
+Produce a comprehensive report. Be brutally specific — every issue must name the file and line.
 
-1. **What was delivered**: Describe what the freelancer actually built/submitted
-2. **Code quality analysis**: Point out specific good practices and problems with file names and line references
-3. **Task completion**: Does it solve the customer's requirements?
-4. **Skill demonstration**: How well did they demonstrate each required skill?
-5. **Issues found**: List specific problems (security issues, bugs, missing features, code smells)
-6. **Positive aspects**: What was done well
-7. **Final recommendation**: Should the client approve, reject, or escalate to DAO?
+**Sections required in detailed_report (markdown, min 300 words):**
+1. **What was delivered** — summarise what was built
+2. **What the freelancer did wrong** — for EVERY problem:
+   - State the file name and approximate line number
+   - Paste the EXACT problematic lines inside a fenced code block (```language ... ```)
+   - Explain precisely WHY it is wrong (security risk? bug? wrong pattern? missing requirement?)
+   - Show the corrected version in a second code block
+   The report must be fully self-contained: DAO voters cannot see the source files, so every issue must include the literal code so they can judge without accessing the repository.
+3. **What was done well** — specific good practices, also quoting the code that demonstrates them
+4. **Task completion** — which acceptance criteria are met and which are missing
+5. **Skill demonstration** — how well each required skill was shown
+6. **Final recommendation** — approve / reject / escalate_to_dao with one-sentence justification
 
-Be specific with code examples and file references. This report will be shown to the client and DAO voters.
+**confidence_score** — your overall score 0-100 for the submission quality (85 = solid work with minor issues, 40 = significant problems, 10 = nearly nothing working)
 
-Reputation delta guide: +20 excellent, +15 very good, +10 good, +5 acceptable, 0 barely acceptable, -10 poor, -20 failed
+**task_complexity** — rate the complexity of the TASK (not the submission) on a scale 100-1000:
+  100-200: trivial — hello world, tiny scripts
+  200-400: simple — basic CRUD, simple scripts, UI components
+  400-600: moderate — authentication, basic smart contracts, REST APIs
+  600-800: complex — DeFi protocols, multi-service architectures, security-critical systems
+  800-1000: expert — novel algorithms, cross-chain bridges, highly optimised systems
 
-Respond ONLY with this JSON:
+Reputation delta guide: +20 excellent, +10 good, +5 acceptable, 0 borderline, -10 poor, -20 failed/dangerous code
+
+Respond ONLY with this JSON (no markdown, no extra text):
 {{
-    "detailed_report": "Full markdown-formatted text report explaining everything (minimum 300 words)",
-    "recommendation": "approve" or "reject" or "escalate_to_dao",
-    "suggested_reputation_delta": integer from -20 to +20,
+    "detailed_report": "Full markdown report with specific file:line references (min 300 words)",
+    "recommendation": "approve" | "reject" | "escalate_to_dao",
+    "confidence_score": integer 0-100,
+    "task_complexity": integer 400-2400,
+    "suggested_reputation_delta": integer -20 to +20,
     "suggested_skills": {{
         "skill_name": {{
             "new_level": 0.0-10.0,
-            "reasoning": "why this skill level"
+            "reasoning": "one sentence"
         }}
-    }}
+    }},
+    "code_issues": [
+        {{
+            "file": "filename.ext",
+            "line": "approximate line or range e.g. 42 or 38-45",
+            "severity": "critical" | "high" | "medium" | "low",
+            "issue": "short title",
+            "detail": "what the bad code does and why it is wrong",
+            "snippet": "the actual problematic code (max 3 lines)",
+            "fix": "what should be written instead"
+        }}
+    ]
 }}
 """
             }
@@ -155,23 +185,35 @@ Respond ONLY with this JSON:
 
     # Safe JSON parsing
     try:
-        return json.loads(raw)
+        result = json.loads(raw)
     except json.JSONDecodeError:
         start = raw.find("{")
         end = raw.rfind("}") + 1
         if start != -1 and end > start:
-            return json.loads(raw[start:end])
-        # Fallback if parsing completely fails
+            try:
+                result = json.loads(raw[start:end])
+            except json.JSONDecodeError:
+                result = None
+        else:
+            result = None
+
+    if result is None:
         return {
             "detailed_report": (
                 "## Evaluation Report\n\n"
-                "**Status:** ERROR - AI evaluation failed\n\n"
-                "The AI evaluation system encountered an error while processing this submission. "
-                "Manual review is required.\n\n"
-                "### Recommendation\n"
-                "Escalate to DAO for human review."
+                "**Status:** ERROR — AI evaluation failed to produce a parseable response.\n\n"
+                "Manual review is required."
             ),
             "recommendation": "escalate_to_dao",
+            "confidence_score": 0,
+            "task_complexity": 400,
             "suggested_reputation_delta": 0,
-            "suggested_skills": {}
+            "suggested_skills": {},
+            "code_issues": []
         }
+
+    # Ensure required fields exist with safe defaults
+    result.setdefault("confidence_score", 50)
+    result.setdefault("task_complexity", 400)
+    result.setdefault("code_issues", [])
+    return result

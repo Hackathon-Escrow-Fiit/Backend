@@ -14,6 +14,7 @@ Usage:
 
 import requests
 import json
+import time
 from pathlib import Path
 
 # Backend URL
@@ -68,17 +69,17 @@ def test_health():
     return response.status_code == 200
 
 def test_evaluate():
-    """Test the evaluation endpoint"""
+    """Test the evaluation endpoint (async — polls /report until done)."""
     print("=" * 60)
     print("Testing /evaluate endpoint...")
     print("=" * 60)
 
-    # Create a temporary contract file
     contract_path = Path("test_contract.sol")
     contract_path.write_text(SAMPLE_CONTRACT)
 
+    escrow_id = f"test_escrow_{int(time.time())}"
     data = {
-        'escrow_id': 'test_escrow_001',
+        'escrow_id': escrow_id,
         'freelancer_address': '0x742d35Cc6634C0532925a3b844Bc9e7595f0bEb1',
         'customer_task': 'Create a simple escrow smart contract that allows the client to release funds to the freelancer or refund to themselves. Must include basic access control.',
         'required_skills': json.dumps(['solidity', 'smart-contracts'])
@@ -90,37 +91,83 @@ def test_evaluate():
     print()
 
     try:
-        # Open file in context manager to ensure it's closed properly
         with open(contract_path, 'rb') as f:
-            files = {
-                'files': ('SimpleEscrow.sol', f, 'text/plain')
-            }
-            response = requests.post(f"{BASE_URL}/evaluate", files=files, data=data)
+            response = requests.post(
+                f"{BASE_URL}/evaluate",
+                files={'files': ('SimpleEscrow.sol', f, 'text/plain')},
+                data=data
+            )
 
         print(f"Status: {response.status_code}")
 
-        if response.status_code == 200:
-            result = response.json()
-            print(f"\nEscrow ID: {result['escrow_id']}")
-            print(f"Freelancer: {result['freelancer']}")
-            print(f"Recommendation: {result['recommendation']}")
-            print(f"Trigger DAO: {result['trigger_dao']}")
-            print(f"Current Reputation: {result['current_reputation']}")
-            print("\n" + "=" * 60)
-            print("DETAILED AI REPORT:")
-            print("=" * 60)
-            print(result['detailed_report'])
-            print("=" * 60)
-            return result['escrow_id']
-        else:
+        if response.status_code != 200:
             print(f"Error: {response.text}")
             return None
+
+        result = response.json()
+        print(f"Accepted — status: {result['status']} (AI running in background…)\n")
+
+        # Poll /report until status leaves 'evaluating'
+        print("Polling /report for result", end="", flush=True)
+        for _ in range(120):  # up to 2 minutes
+            time.sleep(5)
+            print(".", end="", flush=True)
+            report = requests.get(f"{BASE_URL}/report/{escrow_id}").json()
+            if report.get("status") != "evaluating":
+                break
+        print()
+
+        status = report.get("status")
+        if status == "evaluating":
+            print("Timed out waiting for AI evaluation.")
+            return None
+        if status == "error":
+            print("Background evaluation failed — check server logs.")
+            return None
+
+        print(f"\nEscrow ID:      {report['escrow_id']}")
+        print(f"Freelancer:     {report['freelancer']}")
+        print(f"Recommendation: {report['recommendation']}")
+        print(f"Confidence:     {report.get('confidence_score')}%")
+        print(f"Complexity:     {report.get('task_complexity')}")
+
+        elo = report.get("elo")
+        if elo:
+            fb = elo.get("formula_breakdown", {})
+            print("\n" + "=" * 60)
+            print("ELO FORMULA BREAKDOWN:")
+            print("=" * 60)
+            print(f"  Formula:           {fb.get('formula')}")
+            print(f"  BASE               = {fb.get('BASE')}  (max Elo per task)")
+            print(f"  confidence_score   = {fb.get('confidence_score')}%")
+            print(f"  ai                 = {fb.get('ai')}  (confidence / 100)")
+            print(f"  freelancer_elo     = {fb.get('freelancer_elo')}")
+            print(f"  task_complexity    = {fb.get('task_complexity')}")
+            print(f"  E (expected score) = {fb.get('E_expected')}  "
+                  f"= 1 / (1 + 10^(({fb.get('task_complexity')} - {fb.get('freelancer_elo')}) / 400))")
+            print(f"  tasks_completed    = {fb.get('tasks_completed')}")
+            print(f"  nur (new-user mult)= {fb.get('nur_multiplier')}  "
+                  f"(2.5 at task 0 → 1.0 at task 30+)")
+            print(f"  rating_factor      = {fb.get('rating_factor')}  "
+                  f"(1.0 at elo 300 → 0.1 at elo 1000, gains shrink as rating rises)")
+            print(f"  raw_delta          = {fb.get('raw_delta')}")
+            print(f"  final_delta        = {fb.get('final_delta')}")
+            print(f"  approved           = {fb.get('approved')}")
+            print(f"\n  Elo: {elo.get('old_elo')} → {elo.get('new_elo')}  "
+                  f"(+{elo.get('elo_delta')} | tier: {elo.get('old_tier')} → {elo.get('new_tier')})")
+            print("=" * 60)
+
+        print("\n" + "=" * 60)
+        print("DETAILED AI REPORT:")
+        print("=" * 60)
+        print(report['detailed_report'])
+        print("=" * 60)
+        return escrow_id
 
     except Exception as e:
         print(f"Error: {e}")
         return None
     finally:
-        # Clean up test file
         try:
             if contract_path.exists():
                 contract_path.unlink()
@@ -143,6 +190,7 @@ def test_get_report(escrow_id):
             result = response.json()
             print(f"\nEscrow ID: {result['escrow_id']}")
             print(f"Freelancer: {result['freelancer']}")
+            print(f"Status: {result['status']}")
             print(f"Recommendation: {result['recommendation']}")
             print("\nReport retrieved successfully!")
         else:
@@ -154,19 +202,19 @@ def test_get_report(escrow_id):
     print()
 
 def test_finalize(escrow_id, work_approved=True):
-    """Test the finalize endpoint"""
+    """Test the client-decision endpoint"""
     print("=" * 60)
-    print(f"Testing /finalize endpoint (work_approved={work_approved})...")
+    print(f"Testing /client-decision endpoint (work_approved={work_approved})...")
     print("=" * 60)
 
     data = {
         'escrow_id': escrow_id,
-        'work_approved': work_approved
+        'decision': 'approve' if work_approved else 'reject'
     }
 
     try:
         response = requests.post(
-            f"{BASE_URL}/finalize",
+            f"{BASE_URL}/client-decision",
             json=data,
             headers={'Content-Type': 'application/json'}
         )
@@ -175,9 +223,21 @@ def test_finalize(escrow_id, work_approved=True):
 
         if response.status_code == 200:
             result = response.json()
-            print(f"\nFreelancer: {result['freelancer']}")
+            print(f"\nFreelancer:       {result['freelancer']}")
             print(f"Reputation Delta: {result['reputation_delta']}")
-            print(f"Skill Changes: {json.dumps(result['skill_changes'], indent=2)}")
+            print(f"Skill Changes:    {json.dumps(result['skill_changes'], indent=2)}")
+
+            elo = result.get("elo")
+            if elo:
+                fb = elo.get("formula_breakdown", {})
+                print("\n--- Elo formula at decision time ---")
+                print(f"  Formula:  {fb.get('formula')}")
+                print(f"  BASE={fb.get('BASE')}  ai={fb.get('ai')}  "
+                      f"E={fb.get('E_expected')}  nur={fb.get('nur_multiplier')}")
+                print(f"  raw={fb.get('raw_delta')}  →  delta={fb.get('final_delta')}")
+                print(f"  Elo: {elo['old_elo']} → {elo['new_elo']}  "
+                      f"(tier: {elo['old_tier']} → {elo['new_tier']})")
+
             print("\nFinalization successful!")
         else:
             print(f"Error: {response.text}")
