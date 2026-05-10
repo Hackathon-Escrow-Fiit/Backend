@@ -13,22 +13,25 @@ client = OpenAI(
 )
 
 
-def read_files(file_paths: list[str]) -> str:
+def read_files(file_paths: list[str]) -> tuple[str, list[str]]:
     """
-    Reads all submitted files and concatenates them into a single string
-    that can be passed to the AI model as context.
+    Reads all submitted files with line numbers so the AI can cite exact lines.
+    Returns (concatenated_content, list_of_file_names).
     """
     result = ""
+    names: list[str] = []
     for path_str in file_paths:
         path = Path(path_str)
         if not path.exists():
             continue
+        names.append(path.name)
         try:
-            content = path.read_text(encoding="utf-8")
-            result += f"\n\n--- FILE: {path.name} ---\n{content}\n--- END ---"
+            lines = path.read_text(encoding="utf-8").splitlines()
+            numbered = "\n".join(f"{i + 1:4d} | {line}" for i, line in enumerate(lines))
+            result += f"\n\n=== FILE: {path.name} ({len(lines)} lines) ===\n{numbered}\n=== END {path.name} ===\n"
         except Exception:
-            result += f"\n\n--- FILE: {path.name} ---\n[BINARY OR UNREADABLE FILE]\n--- END ---"
-    return result
+            result += f"\n\n=== FILE: {path.name} ===\n[BINARY OR UNREADABLE]\n=== END {path.name} ===\n"
+    return result, names
 
 
 def run_ai_evaluation(
@@ -60,25 +63,25 @@ def run_ai_evaluation(
             - suggested_skills: AI's suggestion for skill level changes
     """
 
-    files_content = read_files(file_paths)
+    files_content, submitted_names = read_files(file_paths)
 
     # Handle empty submission before calling AI
     if not files_content.strip():
         return {
             "detailed_report": (
                 "## Evaluation Report\n\n"
-                "**Status:** REJECTED - No submission provided\n\n"
-                "### Summary\n"
-                "No files were submitted or all files were unreadable. "
-                "The freelancer did not provide any deliverables for evaluation.\n\n"
-                "### Recommendation\n"
-                "Reject this submission and apply reputation penalty for non-delivery."
+                "**Status:** REJECTED — No files submitted\n\n"
+                "The freelancer did not upload any readable files. "
+                "Nothing can be evaluated."
             ),
             "recommendation": "reject",
             "confidence_score": 0,
             "task_complexity": 400,
-            "suggested_reputation_delta": -10,
+            "suggested_reputation_delta": -15,
             "suggested_skills": {},
+            "requirements_check": [],
+            "files_submitted": [],
+            "files_missing": ["all deliverables"],
             "code_issues": []
         }
 
@@ -91,124 +94,156 @@ def run_ai_evaluation(
     else:
         skills_context = "No previous skill evaluations (new freelancer)"
 
+    submitted_list = "\n".join(f"  - {n}" for n in submitted_names) or "  (none)"
+
     response = client.chat.completions.create(
         model="meta/llama-3.3-70b-instruct",
         messages=[
             {
                 "role": "system",
                 "content": (
-                    "You are a senior technical reviewer for a decentralized freelance platform. "
-                    "Your job is to produce actionable, specific code reviews — not vague summaries. "
-                    "Always cite the exact file name and approximate line number for every issue. "
-                    "Quote the problematic code snippet and explain precisely why it is wrong or risky. "
-                    "Always respond with valid JSON only. No extra text, no markdown fences, no code blocks."
+                    "You are a strict senior code reviewer for a decentralized freelance platform. "
+                    "Real money is locked in escrow and only released when you say the work is good. "
+                    "Your entire response MUST be a single valid JSON object — no text before or after, "
+                    "no triple backticks inside any string value. "
+                    "Every issue you report MUST reference the exact line number from the numbered source code provided. "
+                    "The snippet field must be a single line copied verbatim from the file (replace any \" inside with '). "
+                    "Never invent issues that are not visible in the source code shown."
                 )
             },
             {
                 "role": "user",
                 "content": f"""
-Evaluate this freelance submission and create a detailed technical report for the client and DAO voters.
+You are reviewing a freelancer submission. The client will only release payment if you confirm the work is complete and correct.
 
-=== CUSTOMER TASK ===
+=== TASK DESCRIPTION (what the client paid for) ===
 {customer_task}
 
 === REQUIRED SKILLS ===
 {', '.join(required_skills)}
 
-=== FREELANCER CURRENT PROFILE ===
-Reputation: {current_reputation}
-Skills:
-{skills_context}
+=== FILES SUBMITTED BY FREELANCER ({len(submitted_names)} file(s)) ===
+{submitted_list}
 
-=== SUBMITTED FILES ===
+=== FULL FILE CONTENTS WITH LINE NUMBERS ===
 {files_content}
 
-=== INSTRUCTIONS ===
-Produce a comprehensive report. Be brutally specific — every issue must name the file and line.
+=== FREELANCER PROFILE ===
+Reputation: {current_reputation} | Skills: {skills_context}
 
-**Sections required in detailed_report (markdown, min 300 words):**
-1. **What was delivered** — summarise what was built
-2. **What the freelancer did wrong** — for EVERY problem:
-   - State the file name and approximate line number
-   - Paste the EXACT problematic lines inside a fenced code block (```language ... ```)
-   - Explain precisely WHY it is wrong (security risk? bug? wrong pattern? missing requirement?)
-   - Show the corrected version in a second code block
-   The report must be fully self-contained: DAO voters cannot see the source files, so every issue must include the literal code so they can judge without accessing the repository.
-3. **What was done well** — specific good practices, also quoting the code that demonstrates them
-4. **Task completion** — which acceptance criteria are met and which are missing
-5. **Skill demonstration** — how well each required skill was shown
-6. **Final recommendation** — approve / reject / escalate_to_dao with one-sentence justification
+=== YOUR JOB — DO EACH STEP IN ORDER ===
 
-**confidence_score** — your overall score 0-100 for the submission quality (85 = solid work with minor issues, 40 = significant problems, 10 = nearly nothing working)
+STEP 1 — FILES CHECK:
+  Look at the submitted files list above. Based on the task, what files SHOULD be there?
+  List every file that is MISSING. If a file is empty or has dummy/placeholder content, mark it missing.
+  Put results in: files_submitted (exactly what was given), files_missing (what should be there but is not).
 
-**task_complexity** — rate the complexity of the TASK (not the submission) on a scale 100-1000:
-  100-200: trivial — hello world, tiny scripts
-  200-400: simple — basic CRUD, simple scripts, UI components
-  400-600: moderate — authentication, basic smart contracts, REST APIs
-  600-800: complex — DeFi protocols, multi-service architectures, security-critical systems
-  800-1000: expert — novel algorithms, cross-chain bridges, highly optimised systems
+STEP 2 — LINE-BY-LINE CODE REVIEW:
+  Read every file carefully. For EACH real bug, vulnerability, or missing feature you find:
+  - State the exact file name
+  - State the exact line number (from the numbered source above — e.g. line 23)
+  - Copy the EXACT line of code from that file as the snippet (replace any double-quote with single-quote)
+  - Explain precisely what is wrong and why it matters
+  If the file is too short, incomplete, or clearly not what the task asked for — that itself is a critical issue.
 
-Reputation delta guide: +20 excellent, +10 good, +5 acceptable, 0 borderline, -10 poor, -20 failed/dangerous code
+STEP 3 — REQUIREMENTS CHECK:
+  Go through EACH requirement implied by the task description.
+  For each: say whether it is met, and if not — exactly what is missing (which function, which file, which line).
 
-Respond ONLY with this JSON (no markdown, no extra text):
+STEP 4 — SCORE:
+  confidence_score 0-100 (grade the SUBMISSION quality, not the task difficulty):
+    90-100: production-ready, deploy tomorrow
+    70-89:  works, a few real issues to fix
+    50-69:  partially done, important pieces missing
+    20-49:  major gaps, significant rework needed
+    0-19:   almost nothing works, empty, or dangerous
+
+  task_complexity 100-1000 (grade the TASK difficulty, not the submission):
+    100-300: simple scripts, basic tokens
+    300-500: standard contracts, REST APIs
+    500-700: DeFi protocols, multi-contract systems
+    700-1000: cross-chain, novel algorithms, security-critical
+
+  suggested_reputation_delta: +20 excellent, +10 good, +5 acceptable, 0 borderline, -10 poor, -15 dangerous/empty
+
+STEP 5 — RECOMMENDATION:
+  "approve"         — task is done, meets requirements, no critical bugs
+  "reject"          — task is incomplete, has critical bugs, or files are missing
+  "escalate_to_dao" — borderline case needing human judgment
+
+=== JSON FORMAT (respond with ONLY this, no other text) ===
 {{
-    "detailed_report": "Full markdown report with specific file:line references (min 300 words)",
-    "recommendation": "approve" | "reject" | "escalate_to_dao",
-    "confidence_score": integer 0-100,
-    "task_complexity": integer 100-1000,
-    "suggested_reputation_delta": integer -20 to +20,
+    "files_submitted": ["list", "of", "actual", "submitted", "filenames"],
+    "files_missing": ["list of files that should exist but do not"],
+    "recommendation": "approve",
+    "confidence_score": 75,
+    "task_complexity": 400,
+    "suggested_reputation_delta": 8,
     "suggested_skills": {{
-        "skill_name": {{
-            "new_level": 0.0-10.0,
-            "reasoning": "one sentence"
-        }}
+        "solidity": {{"new_level": 7.0, "reasoning": "one sentence"}}
     }},
+    "requirements_check": [
+        {{
+            "requirement": "exact requirement from the task",
+            "met": true,
+            "detail": "how it was met OR exactly what is missing (which file, which function, which line)"
+        }}
+    ],
     "code_issues": [
         {{
-            "file": "filename.ext",
-            "line": "approximate line or range e.g. 42 or 38-45",
-            "severity": "critical" | "high" | "medium" | "low",
-            "issue": "short title",
-            "detail": "what the bad code does and why it is wrong",
-            "snippet": "the actual problematic code (max 3 lines)",
-            "fix": "what should be written instead"
+            "file": "Contract.sol",
+            "line": "23",
+            "severity": "critical",
+            "issue": "Short title of the problem",
+            "detail": "Full explanation: what the code does, why it is wrong, what can go wrong",
+            "snippet": "exact line 23 copied from source (single quotes only, max 120 chars)"
         }}
-    ]
+    ],
+    "detailed_report": "## Files Received\\n\\n- file1.sol (45 lines)\\n\\n## Missing Files\\n\\n- tests/\\n\\n## Code Issues\\n\\n### Critical: Reentrancy in withdraw() (Contract.sol line 23)\\nLine 23: ...\\nThis is dangerous because...\\n\\n## What Was Done Well\\n\\n...\\n\\n## Final Verdict\\n\\nREJECT — missing test suite and reentrancy vulnerability on line 23."
 }}
 """
             }
         ],
-        temperature=0.2
+        temperature=0.2,
+        max_tokens=4096,
     )
 
     raw = response.choices[0].message.content.strip()
 
-    # Safe JSON parsing
-    try:
-        result = json.loads(raw)
-    except json.JSONDecodeError:
-        start = raw.find("{")
-        end = raw.rfind("}") + 1
-        if start != -1 and end > start:
-            try:
-                result = json.loads(raw[start:end])
-            except json.JSONDecodeError:
-                result = None
-        else:
-            result = None
+    # Strip markdown fences the model sometimes wraps around the JSON
+    if raw.startswith("```"):
+        raw = raw.split("\n", 1)[-1]
+        if raw.endswith("```"):
+            raw = raw.rsplit("```", 1)[0]
+        raw = raw.strip()
+
+    # Safe JSON parsing with progressively broader extraction
+    result = None
+    for attempt in (raw, raw[raw.find("{"):raw.rfind("}") + 1] if "{" in raw else ""):
+        if not attempt:
+            continue
+        try:
+            result = json.loads(attempt)
+            break
+        except json.JSONDecodeError:
+            pass
 
     if result is None:
+        print(f"[evaluator] JSON parse failed. Raw response (first 500 chars): {raw[:500]}")
         return {
             "detailed_report": (
                 "## Evaluation Report\n\n"
-                "**Status:** ERROR — AI evaluation failed to produce a parseable response.\n\n"
-                "Manual review is required."
+                "**Note:** AI response could not be parsed as JSON. Raw output below:\n\n"
+                + raw[:3000]
             ),
             "recommendation": "escalate_to_dao",
             "confidence_score": 0,
             "task_complexity": 400,
             "suggested_reputation_delta": 0,
             "suggested_skills": {},
+            "requirements_check": [],
+            "files_submitted": submitted_names,
+            "files_missing": [],
             "code_issues": []
         }
 
@@ -216,6 +251,9 @@ Respond ONLY with this JSON (no markdown, no extra text):
     result.setdefault("confidence_score", 50)
     result.setdefault("task_complexity", 400)
     result.setdefault("code_issues", [])
+    result.setdefault("requirements_check", [])
+    result.setdefault("files_submitted", submitted_names)
+    result.setdefault("files_missing", [])
     return result
 
 

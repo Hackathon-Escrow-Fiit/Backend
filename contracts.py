@@ -148,7 +148,8 @@ def _send(fn) -> bool:
         print(f"[contracts] {'✓' if ok else '✗'} tx {tx_hash.hex()} block {receipt['blockNumber']}")
         return ok
     except Exception as e:
-        print(f"[contracts] Error sending tx: {e}")
+        # Non-fatal — on-chain write skipped (job may not be in the required state)
+        print(f"[contracts] ⚠ on-chain write skipped: {type(e).__name__}")
         return False
 
 

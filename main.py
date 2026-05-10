@@ -56,8 +56,12 @@ async def evaluate(
       4. Write approveWork / rejectWork + setSkill txs to chain
       5. Update DB row to status='pending' with full report
     """
-    if get_pending(escrow_id):
-        raise HTTPException(400, "Evaluation already exists for this escrow")
+    existing = get_pending(escrow_id)
+    if existing:
+        if existing["status"] == "evaluating":
+            raise HTTPException(400, "Evaluation already in progress for this escrow — please wait")
+        # Previous attempt finished or errored — delete it and allow re-submission
+        delete_submission(escrow_id)
 
     saved_paths = save_uploaded_files(escrow_id, files)
     skills_list = json.loads(required_skills)
@@ -132,7 +136,12 @@ async def get_report(escrow_id: str):
         "confidence_score": ai_report.get("confidence_score") if ai_report else None,
         "task_complexity": ai_report.get("task_complexity") if ai_report else None,
         "code_issues": ai_report.get("code_issues", []) if ai_report else [],
+        "requirements_check": ai_report.get("requirements_check", []) if ai_report else [],
+        "files_submitted": ai_report.get("files_submitted", []) if ai_report else [],
+        "files_missing": ai_report.get("files_missing", []) if ai_report else [],
         "elo": ai_report.get("elo") if ai_report else None,
+        "suggested_reputation_delta": ai_report.get("suggested_reputation_delta") if ai_report else None,
+        "suggested_skills": ai_report.get("suggested_skills", {}) if ai_report else {},
     }
 
 
@@ -210,17 +219,21 @@ async def dao_resolve(body: DaoResolveRequest):
 # ─────────────────────────────────────────
 # 5. FILE ACCESS — browse and download code after DAO resolution
 # ─────────────────────────────────────────
+_FILE_ACCESSIBLE_STATUSES = {"pending", "dao_pending", "dao_resolved"}
+
+
 @app.get("/files/{escrow_id}")
 async def list_files(escrow_id: str):
     """
     Lists all files available for a submission.
-    Only works after DAO resolution (files are deleted on direct approve/reject).
+    Files are accessible during review (pending), DAO voting (dao_pending), and after DAO resolution.
+    They are deleted on direct client approve/reject.
     """
     record = get_pending(escrow_id)
     if not record:
         raise HTTPException(404, "No evaluation found for this escrow")
-    if record["status"] != "dao_resolved":
-        raise HTTPException(400, "Files are only accessible after DAO resolution")
+    if record["status"] not in _FILE_ACCESSIBLE_STATUSES:
+        raise HTTPException(400, f"Files are not accessible in status '{record['status']}'")
 
     return {
         "escrow_id": escrow_id,
@@ -231,13 +244,14 @@ async def list_files(escrow_id: str):
 @app.get("/files/{escrow_id}/{filename}")
 async def download_file(escrow_id: str, filename: str):
     """
-    Downloads a single file from a DAO-resolved submission.
+    Downloads a single file from a submission.
+    Accessible during pending, dao_pending, and dao_resolved statuses.
     """
     record = get_pending(escrow_id)
     if not record:
         raise HTTPException(404, "No evaluation found for this escrow")
-    if record["status"] != "dao_resolved":
-        raise HTTPException(400, "Files are only accessible after DAO resolution")
+    if record["status"] not in _FILE_ACCESSIBLE_STATUSES:
+        raise HTTPException(400, f"Files are not accessible in status '{record['status']}'")
 
     path = get_submission_file_path(escrow_id, filename)
     if path is None:
